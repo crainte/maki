@@ -45,6 +45,8 @@ struct ResponseData {
 ///   `timeout` (integer) Timeout in seconds, max 120 (default 30).
 ///   `max_bytes` (integer) Max response size in bytes (default 5 MB).
 ///   `retry` (integer) Retries on 5xx errors (default 3).
+///   `allow_loopback_port` (integer) Allow requests to localhost/127.0.0.1/::1
+///     on this specific port only. Other private IPs remain blocked.
 ///
 /// The response table has three fields: `body` (string), `status`
 /// (integer), and `content_type` (string).
@@ -93,8 +95,16 @@ lua_table! {
 }
 
 fn extract_request_params(url: &str, opts: Option<&Table>) -> Result<RequestParams, String> {
+    // allow_loopback_port: if set, allows requests to localhost/127.0.0.1 on this specific port only
+    let allow_loopback_port = opts
+        .and_then(|o| o.get::<u16>("allow_loopback_port").ok());
+
     let url = validate_and_upgrade_url(url)?;
-    check_ssrf(&url)?;
+    if let Some(port) = allow_loopback_port {
+        check_ssrf_loopback_port(&url, port)?;
+    } else {
+        check_ssrf(&url)?;
+    }
 
     let method = opts
         .and_then(|o| o.get::<String>("method").ok())
@@ -289,6 +299,74 @@ fn check_ssrf(url: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Like check_ssrf, but allows loopback addresses (127.0.0.1, ::1) on a specific port only.
+/// Still blocks other private IPs (10.x, 192.168.x, 169.254.x metadata, etc).
+fn check_ssrf_loopback_port(url: &str, allowed_port: u16) -> Result<(), String> {
+    let host = extract_host(url).ok_or("cannot extract host from URL")?;
+    let url_port = extract_port(url).unwrap_or(443); // HTTPS default after upgrade
+
+    // First check if we're targeting the allowed port
+    if url_port != allowed_port {
+        // Not the allowed port, fall back to normal SSRF check
+        return check_ssrf(url);
+    }
+
+    // Allowed port - permit loopback only
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        if is_loopback_ip(&ip) {
+            return Ok(()); // Loopback on allowed port is OK
+        }
+        if is_private_ip(&ip) {
+            return Err(format!("blocked: {ip} is a private/metadata address"));
+        }
+        return Ok(());
+    }
+
+    // Hostname - resolve and check
+    let addr = format!("{host}:{allowed_port}");
+    if let Ok(addrs) = addr.to_socket_addrs() {
+        for sa in addrs {
+            let ip = sa.ip();
+            if is_loopback_ip(&ip) {
+                return Ok(()); // Loopback on allowed port is OK
+            }
+            if is_private_ip(&ip) {
+                return Err(format!(
+                    "blocked: {host} resolves to private address {}",
+                    ip
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn extract_port(url: &str) -> Option<u16> {
+    let rest = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://"))?;
+    let host_port = rest.split('/').next()?;
+    // Handle IPv6 [::1]:port
+    if let Some(bracket_end) = host_port.find(']') {
+        let after_bracket = &host_port[bracket_end + 1..];
+        if let Some(port_str) = after_bracket.strip_prefix(':') {
+            return port_str.parse().ok();
+        }
+        return None;
+    }
+    // IPv4 or hostname
+    let parts: Vec<&str> = host_port.split(':').collect();
+    if parts.len() == 2 {
+        return parts[1].parse().ok();
+    }
+    None
+}
+
+fn is_loopback_ip(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => v4.is_loopback(),
+        IpAddr::V6(v6) => v6.is_loopback(),
+    }
 }
 
 fn is_private_ip(ip: &IpAddr) -> bool {

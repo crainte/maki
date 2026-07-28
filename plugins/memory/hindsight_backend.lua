@@ -10,10 +10,28 @@ M.DEFAULT_BANK = "maki"
 M.base_url = M.DEFAULT_BASE_URL
 M.bank = M.DEFAULT_BANK
 
+-- Extract port from URL, default to 8888 for Hindsight
+local function extract_port(url)
+  local port_str = url:match(":(%d+)/?")
+  if port_str then
+    return tonumber(port_str)
+  end
+  -- Default ports
+  if url:match("^https://") then
+    return 443
+  end
+  return 80
+end
+
 -- Build the full endpoint URL
 local function endpoint(path)
   local base = M.base_url:gsub("/$", "")
   return base .. path
+end
+
+-- Get the allowed loopback port from the configured URL
+local function get_loopback_port()
+  return extract_port(M.base_url)
 end
 
 -- Make a JSON POST request to Hindsight
@@ -23,6 +41,7 @@ local function post_json(path, body)
     method = "POST",
     headers = { ["Content-Type"] = "application/json" },
     body = json_body,
+    allow_loopback_port = get_loopback_port(),
   })
   if err then
     return nil, "request failed: " .. err
@@ -42,6 +61,7 @@ function M.is_available()
   local res, err = maki.net.request(endpoint("/health"), {
     method = "GET",
     timeout = 2,
+    allow_loopback_port = get_loopback_port(),
   })
   if err then
     return false
