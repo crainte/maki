@@ -3,6 +3,7 @@
 
 pub(crate) mod bedrock;
 pub(crate) mod shared;
+pub(crate) mod vertex;
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};

@@ -237,9 +237,13 @@ local function handler(input, ctx)
   local tools = {}
   for _, t in ipairs(interpreter_tools(maki.api.get_tools({ config = config }), ctx:audience(), ctx:workflow())) do
     local name = t.name
-    local call_opts = t.workflow_only and {} or { timeout = timeout }
     tools[name] = function(tool_input)
-      return maki.agent.call_tool(ctx, name, tool_input, call_opts)
+      if t.workflow_only then
+        return maki.agent.call_tool(ctx, name, tool_input, {})
+      end
+      local tool_timeout = tool_input and tool_input.timeout
+      local effective_timeout = tool_timeout or timeout
+      return maki.agent.call_tool(ctx, name, tool_input, { timeout = effective_timeout })
     end
   end
 

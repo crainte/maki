@@ -34,6 +34,7 @@ use tracing::info;
 use crate::api::ui::buf::BufHandle;
 use crate::api::util::convert::{json_to_lua, lua_to_json, lua_tool_result};
 use crate::api::util::ctx::{AgentContext, LuaCtx};
+use crate::runtime::{TaskHandle, lock_cell};
 
 const SESSION_CLOSED_ERR: &str = "session closed";
 const DEFAULT_SESSION_AUDIENCE: ToolAudience = ToolAudience::GENERAL_SUB;
@@ -319,9 +320,11 @@ async fn call_tool(
     let agent = try_pair!(dispatch_ctx(&ctx, "call_tool"));
     let mut tctx = agent.to_tool_context();
     let (mut on_buf, mut on_ann, mut on_usage, mut rx) = (None, None, None, None);
+    let mut nested_timeout_secs: Option<u64> = None;
     if let Some(o) = opts {
         if let Some(secs) = o.get::<Option<u64>>("timeout")? {
             tctx.deadline = Deadline::after(Duration::from_secs(secs));
+            nested_timeout_secs = Some(secs);
         }
         on_buf = o.get::<Option<Function>>("on_live_buf")?;
         on_ann = o.get::<Option<Function>>("on_annotation")?;
@@ -336,6 +339,19 @@ async fn call_tool(
     if let Err(e) = tctx.deadline.check() {
         return Ok(err_pair(e));
     }
+
+    let saved_deadline = nested_timeout_secs.and_then(|secs| {
+        let nested_deadline = Instant::now() + Duration::from_secs(secs);
+        lua.app_data_ref::<TaskHandle>().and_then(|handle| {
+            let cell = lock_cell(&handle);
+            let old = cell.deadline.get();
+            if old.is_none() || old.is_some_and(|d| nested_deadline > d) {
+                cell.deadline.set(Some(nested_deadline));
+            }
+            old
+        })
+    });
+
     let cbs = LiveCallbacks {
         tool: &name,
         on_buf,
@@ -343,6 +359,13 @@ async fn call_tool(
         on_usage,
     };
     let done = dispatch_racing_live(&tctx, &name, &input_json, rx, &cbs).await;
+
+    if let Some(old_deadline) = saved_deadline
+        && let Some(handle) = lua.app_data_ref::<TaskHandle>()
+    {
+        lock_cell(&handle).deadline.set(Some(old_deadline));
+    }
+
     // Same fallback the UI applies on tool completion, so a batch child's
     // header carries the annotation its standalone run would get.
     let annotation = done

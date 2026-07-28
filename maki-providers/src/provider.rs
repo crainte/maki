@@ -14,6 +14,7 @@ use crate::model::{Model, ModelFamily, ModelInfo};
 use crate::providers::Timeouts;
 use crate::providers::anthropic::Anthropic;
 use crate::providers::anthropic::bedrock;
+use crate::providers::anthropic::vertex;
 use crate::providers::copilot::Copilot;
 use crate::providers::deepseek::DeepSeek;
 use crate::providers::dynamic;
@@ -200,6 +201,8 @@ impl ProviderKind {
             Self::Anthropic => {
                 if bedrock::is_enabled() {
                     Ok(Box::new(bedrock::Bedrock::new(timeouts)?))
+                } else if vertex::is_enabled() {
+                    Ok(Box::new(vertex::Vertex::new(timeouts)?))
                 } else {
                     Ok(Box::new(Anthropic::new(timeouts)?))
                 }
